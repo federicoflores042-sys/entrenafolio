@@ -44,20 +44,24 @@ def registrar_usuario(usuario, contrasena):
         return False
 
 @st.cache_data(ttl=60)
-def load_data_sqlite(user_id):
-    conn = sqlite3.connect('entrenanfolio.db')
-    # JOIN con Master Tickers para traer ratios y tickers de Yahoo automáticamente
-    query = f"""
-        SELECT i.id_inversion, i.ticker as Ticker, i.cantidad as Cantidad, i.tipo as Activo, i.cartera as Cartera,
-               i.costo_promedio as Costo_Unit_Compra,
-               m.ratio as Ratio, m.ticker_yahoo as Ticker_Yahoo
-        FROM inversiones i
-        LEFT JOIN master_tickers m ON i.ticker = m.ticker
-        WHERE i.id_usuario = {user_id}
-    """
-    df = pd.read_sql(query, conn)
-    conn.close()
-    return df
+def load_data_neon(user_id):
+    engine = create_engine(st.secrets["DB_URL"])
+    # Ajustamos los nombres de columnas a los que creamos en Neon
+    query = text("""
+        SELECT id as id_inversion, ticket as Ticker, cantidad as Cantidad, 
+               'Cedears' as Activo, 'Personal' as Cartera,
+               precio_compra as Costo_Unit_Compra,
+               1 as Ratio, ticket as Ticker_Yahoo
+        FROM inversiones 
+        WHERE usuario_id = :uid
+    """)
+    try:
+        with engine.connect() as conn:
+            df = pd.read_sql(query, conn, params={"uid": user_id})
+            return df
+    except Exception as e:
+        st.error(f"Error al cargar datos de Neon: {e}")
+        return pd.DataFrame()
 
 # --- 4. MOTOR DE PRECIOS (TU LÓGICA ORIGINAL) ---
 def obtener_ccl_real():
@@ -153,8 +157,8 @@ else:
      # --- DEFINIR ADMIN ---
     es_admin = st.session_state.user_name.lower() == "federicoflores" 
 
-   # 1. Carga de datos desde SQLite
-    df = load_data_sqlite(st.session_state.user_id)
+   # 1. Carga de datos desde NEON
+   df = load_data_neon(st.session_state.user_id)
 
     # 2. PROCESAMIENTO DE PRECIOS (Mezclado y corregido)
     if not df.empty:
@@ -369,16 +373,26 @@ else:
 
                 submit = st.form_submit_button("Guardar Registro", use_container_width=True, type="primary")
                 
-                if submit:
+              if submit:
                     if q_op > 0:
-                        conn = sqlite3.connect('entrenanfolio.db')
-                        conn.execute("""
-                            INSERT INTO inversiones (id_usuario, ticker, cantidad, tipo, cartera, costo_promedio) 
-                            VALUES (?, ?, ?, ?, ?, ?)
-                        """, (st.session_state.user_id, a_op, q_op, cat_op, cart_op, cp_op))
-                        conn.commit()
-                        conn.close()
-                        st.success(f"✅ ¡{a_op} guardado!"); st.cache_data.clear(); st.rerun()
+                        engine = create_engine(st.secrets["DB_URL"])
+                        query = text("""
+                            INSERT INTO inversiones (usuario_id, ticket, cantidad, precio_compra) 
+                            VALUES (:uid, :t, :c, :p)
+                        """)
+                        try:
+                            with engine.begin() as conn:
+                                conn.execute(query, {
+                                    "uid": st.session_state.user_id, 
+                                    "t": a_op, 
+                                    "c": q_op, 
+                                    "p": cp_op
+                                })
+                            st.success(f"✅ ¡{a_op} guardado en Neon!")
+                            st.cache_data.clear()
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error al guardar: {e}")
 
     with tab_metas:
         st.subheader("🎯 Gestión de Metas")
