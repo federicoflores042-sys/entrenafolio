@@ -352,10 +352,9 @@ else:
                 cat_op = st.selectbox("Categoría", ["Cedears", "Acciones", "Criptomonedas", "Bonos","Obligaciones Negociables"])
                 
                 # Conexión rápida para buscar tickers
-                conn = sqlite3.connect('entrenanfolio.db')
-                tickers_master = pd.read_sql("SELECT ticker FROM master_tickers ORDER BY ticker", conn)['ticker'].tolist()
-                conn.close()
-                
+                engine = create_engine(st.secrets["DB_URL"])
+with engine.connect() as conn:
+    tickers_master = pd.read_sql(text("SELECT ticker FROM master_tickers ORDER BY ticker"), conn)['ticker'].tolist()
                 a_op = st.selectbox("Ticker", tickers_master)
                 
 
