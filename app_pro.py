@@ -416,11 +416,19 @@ else:
                 # --- PANEL DE ADMINISTRACIÓN (SOLO VISIBLE PARA VOS) ---
     if es_admin:
         with tab_admin:
-            st.header("🔧 Panel de Control de Ratios")
+            st.header("🔧 Panel de Control de Ratios (Nube)")
             st.info("Cualquier cambio aquí afectará los cálculos de TODOS los clientes en tiempo real.")
             
-            conn = sqlite3.connect('entrenanfolio.db')
-            df_master = pd.read_sql("SELECT * FROM master_tickers ORDER BY ticker", conn)
+            # 1. Crear el motor de conexión a Neon
+            engine = create_engine(st.secrets["DB_URL"])
+            
+            # 2. Leer los tickers desde la nube
+            try:
+                with engine.connect() as conn:
+                    df_master = pd.read_sql(text("SELECT * FROM master_tickers ORDER BY ticker"), conn)
+            except Exception as e:
+                st.error(f"Error al leer Master Tickers: {e}")
+                df_master = pd.DataFrame()
             
             st.subheader("Editar Master Tickers")
             editado_master = st.data_editor(
@@ -431,10 +439,13 @@ else:
                 hide_index=True
             )
             
+            # 3. Guardar los cambios de vuelta a Neon
             if st.button("Guardar Cambios en Master", type="primary"):
-                # Actualizamos la tabla maestra reemplazando con los nuevos datos del editor
-                editado_master.to_sql('master_tickers', conn, if_exists='replace', index=False)
-                conn.close()
-                st.success("✅ Master Tickers actualizado. Los cambios ya se ven en todas las carteras.")
-                st.cache_data.clear()
-                st.rerun()
+                try:
+                    # 'if_exists=replace' sobrescribe la tabla con los nuevos datos
+                    editado_master.to_sql('master_tickers', engine, if_exists='replace', index=False)
+                    st.success("✅ Master Tickers actualizado en Neon. Los cambios ya son visibles para todos.")
+                    st.cache_data.clear()
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error al guardar en la nube: {e}")
