@@ -326,17 +326,20 @@ else:
                     use_container_width=True
                 )
 
-                if st.button("Confirmar Eliminación", type="primary", use_container_width=True):
+               if st.button("Confirmar Eliminación", type="primary", use_container_width=True):
                     ids_a_borrar = editado[editado['Eliminar'] == True]['id_inversion'].tolist()
                     if ids_a_borrar:
-                        conn = sqlite3.connect('entrenanfolio.db')
-                        cursor = conn.cursor()
-                        cursor.execute(f"DELETE FROM inversiones WHERE id_inversion IN ({','.join(map(str, ids_a_borrar))})")
-                        conn.commit()
-                        conn.close()
-                        st.success(f"✅ Se eliminaron {len(ids_a_borrar)} registros.")
-                        st.cache_data.clear()
-                        st.rerun()
+                        engine = create_engine(st.secrets["DB_URL"])
+                        # En Neon la columna de la tabla inversiones es 'id'
+                        query = text("DELETE FROM inversiones WHERE id IN :ids")
+                        try:
+                            with engine.begin() as conn:
+                                conn.execute(query, {"ids": tuple(ids_a_borrar)})
+                            st.success(f"✅ Se eliminaron {len(ids_a_borrar)} registros de la nube.")
+                            st.cache_data.clear()
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error al eliminar en Neon: {e}")
     with tab_operar:
         st.markdown("### Registrar Movimiento")
         # El popover debe estar indentado dentro de tab_operar
@@ -397,12 +400,18 @@ else:
     with tab_metas:
         st.subheader("🎯 Gestión de Metas")
         n_cartera = st.text_input("Nombre de la nueva meta:")
-        if st.button("Crear Cartera"):
+       if st.button("Crear Cartera"):
             if n_cartera:
-                conn = sqlite3.connect('entrenanfolio.db')
-                conn.execute("INSERT INTO inversiones (id_usuario, ticker, cantidad, tipo, cartera) VALUES (?, 'CASH', 0, 'EFECTIVO', ?)",
-                             (st.session_state.user_id, n_cartera))
-                conn.commit(); conn.close(); st.success("Meta creada!"); st.rerun()
+                engine = create_engine(st.secrets["DB_URL"])
+                # Ajustamos a los nombres de Neon: usuario_id, ticket, cantidad, precio_compra
+                query = text("INSERT INTO inversiones (usuario_id, ticket, cantidad, precio_compra) VALUES (:uid, 'CASH', 0, 0)")
+                try:
+                    with engine.begin() as conn:
+                        conn.execute(query, {"uid": st.session_state.user_id})
+                    st.success("¡Meta creada en la nube!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error: {e}")
                 
                 # --- PANEL DE ADMINISTRACIÓN (SOLO VISIBLE PARA VOS) ---
     if es_admin:
