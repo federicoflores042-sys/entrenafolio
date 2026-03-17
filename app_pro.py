@@ -5,6 +5,7 @@ import yfinance as yf
 import plotly.express as px
 from datetime import datetime
 from iol_client import IOLClient
+from sqlalchemy import create_engine, text
 
 # --- 1. CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(page_title="Entrenanfolio Pro", layout="wide", page_icon="📈")
@@ -27,17 +28,19 @@ def validar_login(usuario, password):
     return resultado if resultado else None
 
 def registrar_usuario(usuario, password):
-    conn = sqlite3.connect('entrenanfolio.db')
-    cursor = conn.cursor()
+    # Usamos la conexión a Neon
+    engine = create_engine(st.secrets["DB_URL"])
     u_limpio = usuario.strip().lower()
+    
+    query = text("INSERT INTO usuarios (nombre_usuario, contrasena) VALUES (:u, :p)")
+    
     try:
-        cursor.execute("INSERT INTO usuarios (usuario, password) VALUES (?, ?)", (u_limpio, password.strip()))
-        conn.commit()
-        exito = True
-    except sqlite3.IntegrityError:
-        exito = False  # El usuario ya existe
-    conn.close()
-    return exito
+        with engine.begin() as conn:
+            conn.execute(query, {"u": u_limpio, "p": password.strip()})
+        return True
+    except Exception as e:
+        st.error(f"Error al registrar: {e}")
+        return False
 
 @st.cache_data(ttl=60)
 def load_data_sqlite(user_id):
