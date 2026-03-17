@@ -20,11 +20,12 @@ except Exception as e:
 def validar_login(usuario, contrasena):
     engine = create_engine(st.secrets["DB_URL"])
     u_limpio = usuario.strip().lower()
-    # Usamos nombre_usuario y contrasena que son los nombres en Neon
-    query = text("SELECT id FROM usuarios WHERE nombre_usuario = :u AND contrasena = :p")
+    # CAMBIO AQUÍ: Agregamos nombre_usuario a la consulta
+    query = text("SELECT id, nombre_usuario FROM usuarios WHERE nombre_usuario = :u AND contrasena = :p")
     try:
         with engine.connect() as conn:
             result = conn.execute(query, {"u": u_limpio, "p": contrasena.strip()}).fetchone()
+            # Ahora devuelve una fila con [id, nombre_usuario]
             return result if result else None
     except Exception as e:
         st.error(f"Error en login: {e}")
