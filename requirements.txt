@@ -1,0 +1,6 @@
+streamlit==1.53.0
+pandas==2.3.3
+sqlalchemy
+psycopg2-binary
+yfinance==0.2.66
+plotly==6.5.0
