@@ -17,26 +17,26 @@ except Exception as e:
     iol = None
 
 # --- 3. FUNCIONES DE BASE DE DATOS ---
-def validar_login(usuario, password):
-    conn = sqlite3.connect('entrenanfolio.db')
-    cursor = conn.cursor()
-    u_limpio = usuario.strip().lower()
-    query = "SELECT id_usuario, usuario FROM usuarios WHERE LOWER(usuario) = ? AND password = ?"
-    cursor.execute(query, (u_limpio, password.strip()))
-    resultado = cursor.fetchone()
-    conn.close()
-    return resultado if resultado else None
-
-def registrar_usuario(usuario, password):
-    # Usamos la conexión a Neon
+def validar_login(usuario, contrasena):
     engine = create_engine(st.secrets["DB_URL"])
     u_limpio = usuario.strip().lower()
-    
+    # Usamos nombre_usuario y contrasena que son los nombres en Neon
+    query = text("SELECT id FROM usuarios WHERE nombre_usuario = :u AND contrasena = :p")
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(query, {"u": u_limpio, "p": contrasena.strip()}).fetchone()
+            return result if result else None
+    except Exception as e:
+        st.error(f"Error en login: {e}")
+        return None
+
+def registrar_usuario(usuario, contrasena):
+    engine = create_engine(st.secrets["DB_URL"])
+    u_limpio = usuario.strip().lower()
     query = text("INSERT INTO usuarios (nombre_usuario, contrasena) VALUES (:u, :p)")
-    
     try:
         with engine.begin() as conn:
-            conn.execute(query, {"u": u_limpio, "p": password.strip()})
+            conn.execute(query, {"u": u_limpio, "p": contrasena.strip()})
         return True
     except Exception as e:
         st.error(f"Error al registrar: {e}")
