@@ -46,9 +46,10 @@ def load_data_neon(user_id):
     # JOIN con master_tickers para obtener Ratio, Activo y Ticker_Yahoo reales
     query = text("""
         SELECT i.id as id_inversion, i.ticket as Ticker, i.cantidad as Cantidad, 
-               m.activo as Activo, 'Personal' as Cartera,
+               m.activo as Activo, i.cartera_destino as Cartera,
                i.precio_compra as Costo_Unit_Compra,
-               m.ratio as Ratio, m.ticker_yahoo as Ticker_Yahoo
+               m.ratio as Ratio, m.ticker_yahoo as Ticker_Yahoo,
+               i.fecha_operacion, i.tipo_operacion, i.moneda_carga
         FROM inversiones i
         LEFT JOIN master_tickers m ON i.ticket = m.ticker
         WHERE i.usuario_id = :uid
@@ -98,7 +99,7 @@ if 'user_id' not in st.session_state:
 
 # --- 6. INTERFAZ: LOGIN O DASHBOARD ---
 if st.session_state.user_id is None:
-    st.title("🚀 Bienvenido a Entrenanfolio")
+    st.title("🚀 Bienvenido a Entrenanfolio Pro")
     tab_login, tab_registro = st.tabs(["Ingresar", "Registrarme"])
 
     with tab_login:
@@ -166,7 +167,11 @@ else:
 
         def calcular_costo_ajustado(row):
             costo = row['Costo_Unit_Compra']
-            if costo > 500: costo = costo / tc_conversion
+            # Lógica para determinar si se cargó en ARS o USD basada en la nueva columna moneda_carga
+            es_ars = row['moneda_carga'] == 'ARS' if pd.notna(row['moneda_carga']) else costo > 500
+            
+            if es_ars: costo = costo / tc_conversion
+            
             if row['Activo'] == 'Cedears':
                 ratio = row['Ratio'] if (pd.notna(row['Ratio']) and row['Ratio'] > 0) else 1
                 return costo / ratio
@@ -223,9 +228,14 @@ else:
                         except Exception as e: st.error(f"Error: {e}")
 
     with tabs[1]:
-        st.markdown("### Registrar Movimiento")
-        with st.popover("➕ Nueva Operación", use_container_width=True):
-            with st.form("form_movimientos_sql", clear_on_submit=True):
+        st.markdown(f"## 📝 Registro en {moneda_visualizacion}")
+        with st.popover("➕ Registrar Operación", use_container_width=True):
+            with st.form("form_op", clear_on_submit=True):
+                
+                f_op = st.date_input("Fecha", datetime.now())
+                t_op = st.selectbox("Operación", ["Compra", "Venta", "Dividendo"])
+                cat_op = st.selectbox("Categoría", ["Cedears", "Acciones", "Criptomonedas", "Bonos", "Obligaciones Negociables"])
+                
                 engine = create_engine(st.secrets["DB_URL"])
                 try:
                     with engine.connect() as conn:
@@ -233,14 +243,34 @@ else:
                 except: lista_t = ["CASH"]
                 
                 tk_op = st.selectbox("Ticker", lista_t)
-                q_op = st.number_input("Cantidad", min_value=0.0, step=0.00001, format="%.5f")
-                p_op = st.number_input("Precio Unitario Compra", min_value=0.0)
+                
+                list_carteras = sorted(list(df['Cartera'].unique())) if not df.empty else ["Vida personal"]
+                cart_op = st.selectbox("Cartera destino:", list_carteras)
+                
+                c3, c4 = st.columns(2)
+                with c3:
+                    mon_op = st.selectbox("Moneda", ["USD", "ARS"], index=0 if moneda_visualizacion == "USD" else 1)
+                with c4:
+                    q_op = st.number_input("Cantidad", min_value=0.0, step=0.00001, format="%.5f")
+                
+                col_p1, col_p2 = st.columns(2)
+                with col_p1:
+                    p_op = st.number_input("Precio Unitario", min_value=0.0)
+                with col_p2:
+                    cp_op = st.number_input("Costo Promedio", min_value=0.0)
+                
                 if st.form_submit_button("Guardar Registro", type="primary", use_container_width=True):
                     if q_op > 0:
+                        query = text("""
+                            INSERT INTO inversiones (usuario_id, ticket, cantidad, precio_compra, fecha_operacion, tipo_operacion, categoria, cartera_destino, moneda_carga, costo_promedio) 
+                            VALUES (:u, :t, :c, :p, :f, :top, :cat, :cart, :mon, :cp)
+                        """)
                         try:
                             with engine.begin() as conn:
-                                conn.execute(text("INSERT INTO inversiones (usuario_id, ticket, cantidad, precio_compra) VALUES (:u, :t, :c, :p)"),
-                                             {"u": st.session_state.user_id, "t": tk_op, "c": q_op, "p": p_op})
+                                conn.execute(query, {
+                                    "u": st.session_state.user_id, "t": tk_op, "c": q_op, "p": p_op,
+                                    "f": f_op, "top": t_op, "cat": cat_op, "cart": cart_op, "mon": mon_op, "cp": cp_op
+                                })
                             st.success(f"✅ ¡{tk_op} guardado!")
                             st.cache_data.clear()
                             st.rerun()
@@ -253,7 +283,8 @@ else:
             engine = create_engine(st.secrets["DB_URL"])
             try:
                 with engine.begin() as conn:
-                    conn.execute(text("INSERT INTO inversiones (usuario_id, ticket, cantidad, precio_compra) VALUES (:uid, 'CASH', 0, 0)"), {"uid": st.session_state.user_id})
+                    conn.execute(text("INSERT INTO inversiones (usuario_id, ticket, cantidad, precio_compra, cartera_destino) VALUES (:uid, 'CASH', 0, 0, :cart)"), 
+                                 {"uid": st.session_state.user_id, "cart": n_cartera})
                 st.success("¡Meta creada!")
                 st.rerun()
             except Exception as e: st.error(f"Error: {e}")
