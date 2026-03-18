@@ -43,13 +43,15 @@ def registrar_usuario(usuario, contrasena):
 @st.cache_data(ttl=60)
 def load_data_neon(user_id):
     engine = create_engine(st.secrets["DB_URL"])
+    # JOIN con master_tickers para obtener Ratio, Activo y Ticker_Yahoo reales
     query = text("""
-        SELECT id as id_inversion, ticket as Ticker, cantidad as Cantidad, 
-               'Cedears' as Activo, 'Personal' as Cartera,
-               precio_compra as Costo_Unit_Compra,
-               1 as Ratio, ticket as Ticker_Yahoo
-        FROM inversiones 
-        WHERE usuario_id = :uid
+        SELECT i.id as id_inversion, i.ticket as Ticker, i.cantidad as Cantidad, 
+               m.activo as Activo, 'Personal' as Cartera,
+               i.precio_compra as Costo_Unit_Compra,
+               m.ratio as Ratio, m.ticker_yahoo as Ticker_Yahoo
+        FROM inversiones i
+        LEFT JOIN master_tickers m ON i.ticket = m.ticker
+        WHERE i.usuario_id = :uid
     """)
     try:
         with engine.connect() as conn:
@@ -76,13 +78,12 @@ def obtener_precio_cached(ticker, ratio, ccl):
             precio_iol = iol.obtener_precio(ticker.replace(".BA", "").strip().upper())
             if precio_iol and precio_iol > 0:
                 if any(x in ticker for x in ["AE38", "AL30", "GD30"]): return float(precio_iol / 100.0)
-                if ratio > 1: return float((precio_iol * ratio) / ccl)
+                if ratio and ratio > 1: return float((precio_iol * ratio) / ccl)
                 return float(precio_iol / ccl)
         except: pass
         
     try:
-        tk_search = ticker if not any(x in ticker for x in ["AE38", "AL30"]) or ticker.endswith(".BA") else f"{ticker}.BA"
-        asset = yf.Ticker(tk_search)
+        asset = yf.Ticker(ticker)
         try:
             precio = float(asset.fast_info['last_price'])
         except:
@@ -126,13 +127,12 @@ if st.session_state.user_id is None:
                     st.error("El usuario debe tener al menos 3 caracteres.")
                 else:
                     if registrar_usuario(new_u, new_p):
-                        st.success("✅ ¡Cuenta creada!")
+                        st.success("✅ ¡Cuenta creada! Ya podés ingresar.")
                     else:
                         st.error("⚠️ El nombre de usuario ya está en uso.")
 else:
     # --- DASHBOARD LOGUEADO ---
     tc_conversion = obtener_ccl_real()
-    
     st.sidebar.title(f"👤 {st.session_state.user_name}")
     moneda_visualizacion = st.sidebar.radio("Ver en:", ["USD", "ARS"], horizontal=True)
     if st.sidebar.button("Cerrar Sesión"):
@@ -140,17 +140,14 @@ else:
         st.rerun()
 
     es_admin = st.session_state.user_name.lower() == "federicoflores" 
-
-    # 1. Carga de datos
     df = load_data_neon(st.session_state.user_id)
 
-    # 2. Procesamiento de precios
     if not df.empty:
         precios_mercado = {}
         with st.spinner('Actualizando cotizaciones...'):
             for _, row in df.iterrows():
                 tk = row['Ticker_Yahoo'] if pd.notna(row['Ticker_Yahoo']) else row['Ticker']
-                precios_mercado[row['Ticker']] = obtener_precio_cached(tk, row['Ratio'] or 1, tc_conversion)
+                precios_mercado[row['Ticker']] = obtener_precio_cached(tk, row['Ratio'], tc_conversion)
 
         df['Precio_Accion_Full'] = df['Ticker'].map(precios_mercado)
         mult = tc_conversion if moneda_visualizacion == "ARS" else 1.0
@@ -165,19 +162,15 @@ else:
                 else: return precio_full
             elif row['Activo'] == 'Cedears':
                 return precio_full / ratio
-            else:
-                return precio_full
+            else: return precio_full
 
         def calcular_costo_ajustado(row):
             costo = row['Costo_Unit_Compra']
             if costo > 500: costo = costo / tc_conversion
-            if row['Activo'] in ['Obligaciones Negociables', 'Bonos', 'ON']:
-                return costo 
-            elif row['Activo'] == 'Cedears':
+            if row['Activo'] == 'Cedears':
                 ratio = row['Ratio'] if (pd.notna(row['Ratio']) and row['Ratio'] > 0) else 1
                 return costo / ratio
-            else:
-                return costo
+            return costo
 
         df['Precio_USD_Unitario'] = df.apply(calcular_precio_unitario, axis=1)
         df['Costo_Unit_Ajustado'] = df.apply(calcular_costo_ajustado, axis=1)
@@ -187,22 +180,20 @@ else:
         df['Valuacion_V'] = pd.to_numeric(df['Valuacion_V'], errors='coerce').fillna(0)
         df['Inversion_Total_V'] = (df['Costo_Unit_Ajustado'] * df['Cantidad']) * mult
         df['Ganancia_Nominal'] = df['Valuacion_V'] - df['Inversion_Total_V']
-        df['ROI_%'] = (df['Ganancia_Nominal'] / df['Inversion_Total_V']) * 100 if total_patrimonio != 0 else 0
+        df['ROI_%'] = (df['Ganancia_Nominal'] / df['Inversion_Total_V']) * 100 if df['Inversion_Total_V'].sum() != 0 else 0
 
-        # --- MÉTRICAS ---
         st.title(f"📊 Mi Portafolio ({moneda_visualizacion})")
         m1, m2, m3, m4 = st.columns(4)
-        total_patrimonio = float(df['Valuacion_V'].sum())
-        total_ganancia = float(df['Ganancia_Nominal'].sum())
-        roi_total = (total_ganancia / (total_patrimonio - total_ganancia)) * 100 if (total_patrimonio - total_ganancia) != 0 else 0
-        simbolo_moneda = 'ARS' if moneda_visualizacion == 'ARS' else 'USD'
+        total_pat = float(df['Valuacion_V'].sum())
+        total_gan = float(df['Ganancia_Nominal'].sum())
+        roi_tot = (total_gan / (total_pat - total_gan)) * 100 if (total_pat - total_gan) != 0 else 0
         
-        m1.metric("Patrimonio Total", f"{simbolo_moneda} {total_patrimonio:,.2f}")
+        m1.metric("Patrimonio Total", f"{moneda_visualizacion} {total_pat:,.2f}")
         m2.metric("Tipo de Cambio (CCL)", f"${tc_conversion}")
-        m3.metric("Ganancia Total", f"{simbolo_moneda} {total_ganancia:,.2f}")
-        m4.metric("ROI Cartera", f"{roi_total:,.2f}%")
+        m3.metric("Ganancia Total", f"{moneda_visualizacion} {total_gan:,.2f}", delta=f"{total_gan:,.2f}")
+        m4.metric("ROI Cartera", f"{roi_tot:,.2f}%", delta=f"{roi_tot:,.2f}%")
 
-    # --- 3. PESTAÑAS ---
+    # --- PESTAÑAS ---
     titulos_tabs = ["💰 Ver Todo", "➕ Nueva Operación", "🎯 Nuevas Metas"]
     if es_admin: titulos_tabs.append("🛠️ Admin Master")
     tabs = st.tabs(titulos_tabs)
@@ -211,63 +202,73 @@ else:
         if not df.empty:
             st.subheader("📊 Detalle de Posiciones")
             df_display = df[['Ticker', 'Cantidad', 'Activo', 'Costo_Unit_Ajustado', 'Precio_V', 'Valuacion_V', 'Ganancia_Nominal', 'ROI_%']].copy()
-            st.dataframe(df_display, use_container_width=True, hide_index=True)
-            fig = px.pie(df, values='Valuacion_V', names='Ticker', hole=0.4, template="plotly_dark")
-            st.plotly_chart(fig, use_container_width=True)
+            df_display.columns = ['Ticker', 'Cant.', 'Tipo', 'Costo Cert.', 'Precio Mercado', 'Valuación', 'Ganancia', 'ROI %']
+            st.dataframe(df_display.style.format({'Costo Cert.': '{:,.2f}', 'Precio Mercado': '{:,.2f}', 'Valuación': '{:,.2f}', 'Ganancia': '{:,.2f}', 'ROI %': '{:,.2f}%'}), use_container_width=True, hide_index=True)
+            st.plotly_chart(px.pie(df, values='Valuacion_V', names='Ticker', hole=0.4, template="plotly_dark"), use_container_width=True)
+
+            with st.expander("🛠️ Gestionar / Eliminar Posiciones"):
+                df_borrar = df[['id_inversion', 'Ticker', 'Cantidad', 'Cartera']].copy()
+                df_borrar['Eliminar'] = False
+                editado = st.data_editor(df_borrar, column_config={"Eliminar": st.column_config.CheckboxColumn(required=True)}, disabled=["id_inversion", "Ticker", "Cantidad", "Cartera"], hide_index=True, use_container_width=True)
+                if st.button("Confirmar Eliminación", type="primary", use_container_width=True):
+                    ids_a_borrar = editado[editado['Eliminar'] == True]['id_inversion'].tolist()
+                    if ids_a_borrar:
+                        engine = create_engine(st.secrets["DB_URL"])
+                        try:
+                            with engine.begin() as conn:
+                                conn.execute(text("DELETE FROM inversiones WHERE id IN :ids"), {"ids": tuple(ids_a_borrar)})
+                            st.success(f"Se eliminaron {len(ids_a_borrar)} registros.")
+                            st.cache_data.clear()
+                            st.rerun()
+                        except Exception as e: st.error(f"Error: {e}")
 
     with tabs[1]:
         st.markdown("### Registrar Movimiento")
         with st.popover("➕ Nueva Operación", use_container_width=True):
             with st.form("form_movimientos_sql", clear_on_submit=True):
-                f_op = st.date_input("Fecha", datetime.now())
-                cat_op = st.selectbox("Categoría", ["Cedears", "Acciones", "Criptomonedas", "Bonos"])
-                
                 engine = create_engine(st.secrets["DB_URL"])
-                with engine.connect() as conn:
-                    tickers_master = pd.read_sql(text("SELECT ticker FROM master_tickers ORDER BY ticker"), conn)['ticker'].tolist()
+                try:
+                    with engine.connect() as conn:
+                        lista_t = pd.read_sql(text("SELECT ticker FROM master_tickers ORDER BY ticker"), conn)['ticker'].tolist()
+                except: lista_t = ["CASH"]
                 
-                a_op = st.selectbox("Ticker", tickers_master)
+                tk_op = st.selectbox("Ticker", lista_t)
                 q_op = st.number_input("Cantidad", min_value=0.0, step=0.00001, format="%.5f")
-                cp_op = st.number_input("Costo Promedio", min_value=0.0)
-                submit = st.form_submit_button("Guardar Registro", use_container_width=True, type="primary")
-                
-                if submit and q_op > 0:
-                    query = text("INSERT INTO inversiones (usuario_id, ticket, cantidad, precio_compra) VALUES (:uid, :t, :c, :p)")
-                    try:
-                        with engine.begin() as conn:
-                            conn.execute(query, {"uid": st.session_state.user_id, "t": a_op, "c": q_op, "p": cp_op})
-                        st.success(f"✅ ¡{a_op} guardado!")
-                        st.cache_data.clear()
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Error: {e}")
+                p_op = st.number_input("Precio Unitario Compra", min_value=0.0)
+                if st.form_submit_button("Guardar Registro", type="primary", use_container_width=True):
+                    if q_op > 0:
+                        try:
+                            with engine.begin() as conn:
+                                conn.execute(text("INSERT INTO inversiones (usuario_id, ticket, cantidad, precio_compra) VALUES (:u, :t, :c, :p)"),
+                                             {"u": st.session_state.user_id, "t": tk_op, "c": q_op, "p": p_op})
+                            st.success(f"✅ ¡{tk_op} guardado!")
+                            st.cache_data.clear()
+                            st.rerun()
+                        except Exception as e: st.error(f"Error: {e}")
 
     with tabs[2]:
         st.subheader("🎯 Gestión de Metas")
         n_cartera = st.text_input("Nombre de la nueva meta:")
         if st.button("Crear Cartera") and n_cartera:
             engine = create_engine(st.secrets["DB_URL"])
-            query = text("INSERT INTO inversiones (usuario_id, ticket, cantidad, precio_compra) VALUES (:uid, 'CASH', 0, 0)")
             try:
                 with engine.begin() as conn:
-                    conn.execute(query, {"uid": st.session_state.user_id})
+                    conn.execute(text("INSERT INTO inversiones (usuario_id, ticket, cantidad, precio_compra) VALUES (:uid, 'CASH', 0, 0)"), {"uid": st.session_state.user_id})
                 st.success("¡Meta creada!")
                 st.rerun()
-            except Exception as e:
-                st.error(f"Error: {e}")
+            except Exception as e: st.error(f"Error: {e}")
 
     if es_admin:
         with tabs[3]:
-            st.header("🔧 Admin Master")
+            st.header("🔧 Panel de Control de Ratios (Nube)")
             engine = create_engine(st.secrets["DB_URL"])
-            try:
-                with engine.connect() as conn:
-                    df_master = pd.read_sql(text("SELECT * FROM master_tickers ORDER BY ticker"), conn)
-                editado_master = st.data_editor(df_master, num_rows="dynamic", use_container_width=True, hide_index=True)
-                if st.button("Guardar Cambios en Master"):
+            with engine.connect() as conn:
+                df_master = pd.read_sql(text("SELECT * FROM master_tickers ORDER BY ticker"), conn)
+            editado_master = st.data_editor(df_master, num_rows="dynamic", use_container_width=True, hide_index=True)
+            if st.button("Guardar Cambios en Master", type="primary"):
+                try:
                     editado_master.to_sql('master_tickers', engine, if_exists='replace', index=False)
-                    st.success("✅ Actualizado!")
+                    st.success("✅ Master Tickers actualizado en Neon.")
                     st.cache_data.clear()
                     st.rerun()
-            except Exception as e:
-                st.error(f"Error Admin: {e}")
+                except Exception as e: st.error(f"Error: {e}")
