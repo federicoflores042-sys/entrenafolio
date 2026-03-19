@@ -43,12 +43,11 @@ def registrar_usuario(usuario, contrasena):
 @st.cache_data(ttl=60)
 def load_data_neon(user_id):
     engine = create_engine(st.secrets["DB_URL"])
-    # JOIN con master_tickers para obtener Ratio, Activo y Ticker_Yahoo reales
     query = text("""
-        SELECT i.id as id_inversion, i.ticket as Ticker, i.cantidad as Cantidad, 
-               m.activo as Activo, i.cartera_destino as Cartera,
-               i.precio_compra as Costo_Unit_Compra,
-               m.ratio as Ratio, m.ticker_yahoo as Ticker_Yahoo,
+        SELECT i.id as id_inversion, i.ticket as ticker, i.cantidad as cantidad, 
+               m.activo as activo, i.cartera_destino as cartera,
+               i.precio_compra as costo_unit_compra,
+               m.ratio as ratio, m.ticker_yahoo as ticker_yahoo,
                i.fecha_operacion, i.tipo_operacion, i.moneda_carga
         FROM inversiones i
         LEFT JOIN master_tickers m ON i.ticket = m.ticker
@@ -57,6 +56,8 @@ def load_data_neon(user_id):
     try:
         with engine.connect() as conn:
             df = pd.read_sql(query, conn, params={"uid": user_id})
+            # Forzamos minúsculas por seguridad
+            df.columns = [c.lower() for c in df.columns]
             return df
     except Exception as e:
         st.error(f"Error al cargar datos de Neon: {e}")
@@ -144,61 +145,53 @@ else:
     df = load_data_neon(st.session_state.user_id)
 
     if not df.empty:
-    precios_mercado = {}
-    with st.spinner('Actualizando cotizaciones...'):
-        for _, row in df.iterrows():
-            # Cambiamos a minúsculas para que coincida con la base de datos
-            # Usamos .get() por seguridad
-            tk_yahoo = row.get('ticker_yahoo')
-            tk_normal = row.get('ticker')
-            
-            # Si ticker_yahoo existe y no es nulo, lo usamos; si no, usamos el ticker normal
-            tk = tk_yahoo if pd.notna(tk_yahoo) else tk_normal
-            
-            # Asegurate de que los nombres de los argumentos coincidan (ratio en minúscula)
-            precios_mercado[tk_normal] = obtener_precio_cached(tk, row.get('ratio'), tc_conversion)
-            
-        df['Precio_Accion_Full'] = df['Ticker'].map(precios_mercado)
+        precios_mercado = {}
+        with st.spinner('Actualizando cotizaciones...'):
+            for _, row in df.iterrows():
+                # Corrección de nombres de columnas a minúsculas
+                tk = row['ticker_yahoo'] if pd.notna(row['ticker_yahoo']) else row['ticker']
+                precios_mercado[row['ticker']] = obtener_precio_cached(tk, row['ratio'], tc_conversion)
+
+        df['precio_accion_full'] = df['ticker'].map(precios_mercado)
         mult = tc_conversion if moneda_visualizacion == "ARS" else 1.0
         
         def calcular_precio_unitario(row):
-            precio_full = row['Precio_Accion_Full']
-            ratio = row['Ratio'] if (pd.notna(row['Ratio']) and row['Ratio'] > 0) else 1
-            if row['Activo'] in ['Obligaciones Negociables', 'Bonos', 'ON']:
+            precio_full = row['precio_accion_full']
+            ratio = row['ratio'] if (pd.notna(row['ratio']) and row['ratio'] > 0) else 1
+            # Normalizamos el nombre del activo para la comparación
+            activo_str = str(row['activo']).lower()
+            if any(x in activo_str for x in ['obligaciones', 'bonos', 'on']):
                 if precio_full > 100: return precio_full / tc_conversion
                 elif 2.0 < precio_full < 10.0: return (precio_full / 7.0) 
                 elif precio_full > 5: return precio_full / 100.0
                 else: return precio_full
-            elif row['Activo'] == 'Cedears':
+            elif 'cedear' in activo_str:
                 return precio_full / ratio
             else: return precio_full
 
         def calcular_costo_ajustado(row):
-            costo = row['Costo_Unit_Compra']
-            # Lógica para determinar si se cargó en ARS o USD basada en la nueva columna moneda_carga
+            costo = row['costo_unit_compra']
             es_ars = row['moneda_carga'] == 'ARS' if pd.notna(row['moneda_carga']) else costo > 500
-            
             if es_ars: costo = costo / tc_conversion
-            
-            if row['Activo'] == 'Cedears':
-                ratio = row['Ratio'] if (pd.notna(row['Ratio']) and row['Ratio'] > 0) else 1
+            if 'cedear' in str(row['activo']).lower():
+                ratio = row['ratio'] if (pd.notna(row['ratio']) and row['ratio'] > 0) else 1
                 return costo / ratio
             return costo
 
-        df['Precio_USD_Unitario'] = df.apply(calcular_precio_unitario, axis=1)
-        df['Costo_Unit_Ajustado'] = df.apply(calcular_costo_ajustado, axis=1)
-        df['Precio_V'] = df['Precio_USD_Unitario'] * mult
-        df['Valuacion_V'] = df['Precio_V'] * df['Cantidad']
+        df['precio_usd_unitario'] = df.apply(calcular_precio_unitario, axis=1)
+        df['costo_unit_ajustado'] = df.apply(calcular_costo_ajustado, axis=1)
+        df['precio_v'] = df['precio_usd_unitario'] * mult
+        df['valuacion_v'] = df['precio_v'] * df['cantidad']
         
-        df['Valuacion_V'] = pd.to_numeric(df['Valuacion_V'], errors='coerce').fillna(0)
-        df['Inversion_Total_V'] = (df['Costo_Unit_Ajustado'] * df['Cantidad']) * mult
-        df['Ganancia_Nominal'] = df['Valuacion_V'] - df['Inversion_Total_V']
-        df['ROI_%'] = (df['Ganancia_Nominal'] / df['Inversion_Total_V']) * 100 if df['Inversion_Total_V'].sum() != 0 else 0
+        df['valuacion_v'] = pd.to_numeric(df['valuacion_v'], errors='coerce').fillna(0)
+        df['inversion_total_v'] = (df['costo_unit_ajustado'] * df['cantidad']) * mult
+        df['ganancia_nominal'] = df['valuacion_v'] - df['inversion_total_v']
+        df['roi_perc'] = (df['ganancia_nominal'] / df['inversion_total_v']) * 100 if df['inversion_total_v'].sum() != 0 else 0
 
         st.title(f"📊 Mi Portafolio ({moneda_visualizacion})")
         m1, m2, m3, m4 = st.columns(4)
-        total_pat = float(df['Valuacion_V'].sum())
-        total_gan = float(df['Ganancia_Nominal'].sum())
+        total_pat = float(df['valuacion_v'].sum())
+        total_gan = float(df['ganancia_nominal'].sum())
         roi_tot = (total_gan / (total_pat - total_gan)) * 100 if (total_pat - total_gan) != 0 else 0
         
         m1.metric("Patrimonio Total", f"{moneda_visualizacion} {total_pat:,.2f}")
@@ -214,15 +207,15 @@ else:
     with tabs[0]:
         if not df.empty:
             st.subheader("📊 Detalle de Posiciones")
-            df_display = df[['Ticker', 'Cantidad', 'Activo', 'Costo_Unit_Ajustado', 'Precio_V', 'Valuacion_V', 'Ganancia_Nominal', 'ROI_%']].copy()
+            df_display = df[['ticker', 'cantidad', 'activo', 'costo_unit_ajustado', 'precio_v', 'valuacion_v', 'ganancia_nominal', 'roi_perc']].copy()
             df_display.columns = ['Ticker', 'Cant.', 'Tipo', 'Costo Cert.', 'Precio Mercado', 'Valuación', 'Ganancia', 'ROI %']
             st.dataframe(df_display.style.format({'Costo Cert.': '{:,.2f}', 'Precio Mercado': '{:,.2f}', 'Valuación': '{:,.2f}', 'Ganancia': '{:,.2f}', 'ROI %': '{:,.2f}%'}), use_container_width=True, hide_index=True)
-            st.plotly_chart(px.pie(df, values='Valuacion_V', names='Ticker', hole=0.4, template="plotly_dark"), use_container_width=True)
+            st.plotly_chart(px.pie(df, values='valuacion_v', names='ticker', hole=0.4, template="plotly_dark"), use_container_width=True)
 
             with st.expander("🛠️ Gestionar / Eliminar Posiciones"):
-                df_borrar = df[['id_inversion', 'Ticker', 'Cantidad', 'Cartera']].copy()
+                df_borrar = df[['id_inversion', 'ticker', 'cantidad', 'cartera']].copy()
                 df_borrar['Eliminar'] = False
-                editado = st.data_editor(df_borrar, column_config={"Eliminar": st.column_config.CheckboxColumn(required=True)}, disabled=["id_inversion", "Ticker", "Cantidad", "Cartera"], hide_index=True, use_container_width=True)
+                editado = st.data_editor(df_borrar, column_config={"Eliminar": st.column_config.CheckboxColumn(required=True)}, disabled=["id_inversion", "ticker", "cantidad", "cartera"], hide_index=True, use_container_width=True)
                 if st.button("Confirmar Eliminación", type="primary", use_container_width=True):
                     ids_a_borrar = editado[editado['Eliminar'] == True]['id_inversion'].tolist()
                     if ids_a_borrar:
@@ -239,7 +232,6 @@ else:
         st.markdown(f"## 📝 Registro en {moneda_visualizacion}")
         with st.popover("➕ Registrar Operación", use_container_width=True):
             with st.form("form_op", clear_on_submit=True):
-                
                 f_op = st.date_input("Fecha", datetime.now())
                 t_op = st.selectbox("Operación", ["Compra", "Venta", "Dividendo"])
                 cat_op = st.selectbox("Categoría", ["Cedears", "Acciones", "Criptomonedas", "Bonos", "Obligaciones Negociables"])
@@ -252,7 +244,7 @@ else:
                 
                 tk_op = st.selectbox("Ticker", lista_t)
                 
-                list_carteras = sorted(list(df['Cartera'].unique())) if not df.empty else ["Vida personal"]
+                list_carteras = sorted(list(df['cartera'].unique())) if not df.empty else ["Vida personal"]
                 cart_op = st.selectbox("Cartera destino:", list_carteras)
                 
                 c3, c4 = st.columns(2)
