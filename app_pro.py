@@ -144,12 +144,24 @@ else:
     df = load_data_neon(st.session_state.user_id)
 
     if not df.empty:
-        precios_mercado = {}
-        with st.spinner('Actualizando cotizaciones...'):
-            for _, row in df.iterrows():
-                tk = row['Ticker_Yahoo'] if pd.notna(row['Ticker_Yahoo']) else row['Ticker']
-                precios_mercado[row['Ticker']] = obtener_precio_cached(tk, row['Ratio'], tc_conversion)
-
+    precios_mercado = {}
+    with st.spinner('Actualizando cotizaciones...'):
+        # 1. Normalizamos los nombres de las columnas a minúsculas para evitar conflictos
+        df.columns = [c.lower() for c in df.columns]
+        
+        for _, row in df.iterrows():
+            # 2. Usamos .get() o verificamos la existencia de la columna de forma segura
+            # Buscamos 'ticker_yahoo' (en minúsculas)
+            col_yahoo = 'ticker_yahoo' 
+            col_ticker = 'ticker'
+            
+            if col_yahoo in row and pd.notna(row[col_yahoo]):
+                tk = row[col_yahoo]
+            else:
+                tk = row[col_ticker]
+            
+            precios_mercado[row[col_ticker]] = obtener_precio_cached(tk, row.get('ratio', 1), tc_conversion)
+            
         df['Precio_Accion_Full'] = df['Ticker'].map(precios_mercado)
         mult = tc_conversion if moneda_visualizacion == "ARS" else 1.0
         
