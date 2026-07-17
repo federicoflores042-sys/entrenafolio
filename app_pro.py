@@ -292,6 +292,20 @@ def init_posiciones_cerradas_table():
     """)
 
 
+def migrar_cash_multimoneda():
+    """
+    Migración idempotente: separa el ticker genérico 'CASH' en 'CASH_ARS' /
+    'CASH_USD' según la moneda de cada movimiento, para no mezclar pesos y
+    dólares en una misma suma. Se puede ejecutar en cada arranque sin riesgo:
+    una vez migrados, ya no quedan filas con ticker='CASH' para volver a tocar.
+    """
+    db.execute("""
+        UPDATE movimientos
+        SET ticker = 'CASH_' || moneda
+        WHERE ticker = 'CASH' AND moneda IN ('ARS', 'USD')
+    """)
+
+
 # =============================================================================
 # MOTOR DE PRECIOS — MEP y CCL separados
 # =============================================================================
@@ -424,6 +438,7 @@ if 'user_id' not in st.session_state:
     st.session_state.user_id = None
 
 init_posiciones_cerradas_table()
+migrar_cash_multimoneda()
 
 # =============================================================================
 # PANTALLA DE LOGIN
@@ -508,9 +523,9 @@ else:
                     precios_usd[ticker] = p_manual / tc_ref if (moneda == 'ARS' and p_manual > 500) else p_manual
                     continue
 
-                # CASH
-                if ticker == 'CASH':
-                    precios_usd['CASH'] = 1.0 if moneda == 'USD' else (1.0 / tc_mep)
+                # CASH (separado por moneda: CASH_ARS / CASH_USD)
+                if ticker.startswith('CASH'):
+                    precios_usd[ticker] = 1.0 if moneda == 'USD' else (1.0 / tc_mep)
                     continue
 
                 # Activos de mercado
@@ -525,12 +540,12 @@ else:
 
         # ── Columnas de precio y costo en USD ──────────────────────────────────
         def precio_usd_unitario(row):
-            if row['Ticker'] == 'CASH':
+            if row['Ticker'].startswith('CASH'):
                 return 1.0 if row['Moneda'] == 'USD' else 1.0 / tc_mep
             return precios_usd.get(row['Ticker'], 0.0)
 
         def costo_usd_unitario(row):
-            if row['Ticker'] == 'CASH':
+            if row['Ticker'].startswith('CASH'):
                 return 1.0 if row['Moneda'] == 'USD' else 1.0 / tc_mep
             costo  = row['Costo_Unit_Compra'] or 0
             activo = row['Activo']
@@ -690,7 +705,7 @@ else:
             )
             # TIR Total: activos + CASH (toda la plata ingresada al sistema)
             # TIR Activos: solo instrumentos, sin penalizar por liquidez ociosa
-            df_activos = df[df['Ticker'] != 'CASH']
+            df_activos = df[~df['Ticker'].str.startswith('CASH')]
 
             if moneda_visualizacion == 'USD':
                 patrimonio_total_usd   = float(df['Valuacion_V'].sum())
@@ -743,7 +758,7 @@ else:
             st.info("No hay posiciones abiertas. Registrá tu primera operación.")
         else:
             # ── CUADRO DE LIQUIDEZ ─────────────────────────────────────────────
-            df_cash = df[df['Ticker'] == 'CASH'].copy()
+            df_cash = df[df['Ticker'].str.startswith('CASH')].copy()
             st.subheader("💵 Liquidez")
             if not df_cash.empty:
                 # Separar correctamente ARS y USD para evitar doble conteo
@@ -824,7 +839,7 @@ else:
                 )
 
             # ── Filtrado sin CASH ──────────────────────────────────────────────
-            df_inv = df[df['Ticker'] != 'CASH']
+            df_inv = df[~df['Ticker'].str.startswith('CASH')]
 
             # Clasificación
             ACTIVOS_RF_BONOS = ['Bonos', 'Títulos Públicos', 'Bono']
@@ -1132,7 +1147,7 @@ else:
             f_op = st.date_input("Fecha", datetime.now(), key="fecha_operacion")
 
             tickers_master = db.run_query(
-                "SELECT ticker FROM master_tickers WHERE ticker != 'CASH' ORDER BY ticker"
+                "SELECT ticker FROM master_tickers WHERE ticker NOT LIKE 'CASH%' ORDER BY ticker"
             )['ticker'].tolist()
 
             if t_op in ["INGRESO", "EGRESO"]:
@@ -1146,7 +1161,13 @@ else:
                 "Ticker / Activo",
                 opciones,
                 disabled=esta_deshabilitado,
-                key=f"ticker_activo_{t_op}"
+                key=f"ticker_activo_{t_op}",
+                help=(
+                    "El CASH se guarda separado por moneda (CASH_ARS / CASH_USD) "
+                    "según lo que elijas en 'Moneda' más abajo, para no mezclar "
+                    "pesos y dólares en un mismo total."
+                    if t_op in ["INGRESO", "EGRESO"] else None
+                )
             )
 
             # Leer carteras desde inversiones (incluye metas nuevas sin movimientos)
@@ -1169,6 +1190,15 @@ else:
 
             p_op = st.number_input("Precio Unitario (en la moneda elegida)", min_value=0.0)
 
+            afectar_cash = True
+            if t_op in ["COMPRA", "VENTA"]:
+                afectar_cash = st.checkbox(
+                    "💵 Descontar / acreditar el monto en CASH automáticamente",
+                    value=True,
+                    help="Si lo desmarcás, tenés que cargar el EGRESO/INGRESO de CASH vos "
+                         "manualmente en otra operación."
+                )
+
             if st.button("Guardar Registro", use_container_width=True, type="primary"):
                 if q_op > 0:
                     cantidad_final = (
@@ -1176,15 +1206,36 @@ else:
                         else -q_op
                     )
                     tc_para_guardar = tc_ccl  # guardamos el CCL como referencia histórica
+
+                    # Ticker efectivo a guardar: el CASH se separa por moneda
+                    # (CASH_ARS / CASH_USD) para no mezclar pesos y dólares.
+                    ticker_final = f"CASH_{m_op}" if t_op in ["INGRESO", "EGRESO"] else a_op
+
                     db.execute("""
                         INSERT INTO movimientos
                           (id_usuario, fecha, ticker, tipo_operacion,
                            cantidad, precio_unitario, moneda, ccl_al_dia, id_cartera)
                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     """, (
-                        st.session_state.user_id, str(f_op), a_op, t_op,
+                        st.session_state.user_id, str(f_op), ticker_final, t_op,
                         cantidad_final, p_op, m_op, tc_para_guardar, cart_op
                     ))
+
+                    # Descontar/acreditar CASH automáticamente en COMPRA / VENTA
+                    if t_op in ["COMPRA", "VENTA"] and afectar_cash:
+                        monto_total = round(q_op * p_op, 5)
+                        tipo_cash = "EGRESO" if t_op == "COMPRA" else "INGRESO"
+                        cantidad_cash = -monto_total if tipo_cash == "EGRESO" else monto_total
+                        db.execute("""
+                            INSERT INTO movimientos
+                              (id_usuario, fecha, ticker, tipo_operacion,
+                               cantidad, precio_unitario, moneda, ccl_al_dia, id_cartera)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        """, (
+                            st.session_state.user_id, str(f_op), f"CASH_{m_op}", tipo_cash,
+                            cantidad_cash, 1, m_op, tc_para_guardar, cart_op
+                        ))
+
                     st.success(f"✅ ¡{t_op} de {a_op} registrado con éxito!")
                     st.cache_data.clear()
                     st.rerun()
@@ -1231,4 +1282,5 @@ else:
                 st.rerun()
             else:
                 conn7.close()
+
 
