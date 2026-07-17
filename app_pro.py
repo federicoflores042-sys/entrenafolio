@@ -123,7 +123,7 @@ def load_data_sqlite(user_id):
         INNER JOIN posiciones_abiertas pa
             ON m.ticker = pa.ticker AND m.id_cartera = pa.id_cartera
         WHERE m.id_usuario = %(uid)s
-        GROUP BY m.ticker, m.id_cartera
+        GROUP BY m.ticker, m.id_cartera, mt.ratio, mt.ticker_yahoo, mt.activo
         HAVING SUM(CASE WHEN m.tipo_operacion IN ('COMPRA','VENTA','INGRESO','EGRESO')
                      THEN m.cantidad ELSE 0 END) > 0.0001
     """
